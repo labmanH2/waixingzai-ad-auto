@@ -1,0 +1,15 @@
+# 运行产物（含截图、控件树、logcat，可能包含设备与账号信息）
+out/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
