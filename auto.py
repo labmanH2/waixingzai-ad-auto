@@ -29,6 +29,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import observe_p0 as P  # noqa: E402
 
+VERSION = "0.2.0"
+
 PKG = "com.etalien.booster"
 HOME_ACT = "com.etalien.booster.ui.MainActivity"
 BTN_ID = "com.etalien.booster:id/UIADSubmit"
@@ -98,6 +100,7 @@ class Bot:
         self.shots.mkdir(parents=True, exist_ok=True)
         self.timeline: list[dict] = []
         self._snap = 0
+        self.last_dump_note = ""
         self.w, self.h = self._screen()
 
     def _screen(self) -> tuple[int, int]:
@@ -128,9 +131,10 @@ class Bot:
         if not P.take_screenshot(self.dev, p):
             p.unlink(missing_ok=True)
 
-    def dump_nodes(self) -> tuple[list[dict], list[str]]:
+    def dump_nodes(self, timeout: int = 8, attempts: int = 1) -> tuple[list[dict], list[str]]:
         p = self.out / "_last.xml"
-        ok, _ = P.dump_ui(self.dev, p)
+        ok, note = P.dump_ui(self.dev, p, timeout=timeout, attempts=attempts)
+        self.last_dump_note = note
         if not ok:
             return [], []
         nodes, texts = [], []
@@ -226,10 +230,12 @@ class Bot:
         return home
 
     # ---------------- 广告处理 ---------------- #
-    def _find_close(self, nodes: list[dict]) -> tuple[int, int] | None:
+    def _find_close(self, nodes: list[dict], strict: bool = False) -> tuple[int, int] | None:
         """只认真正的关闭控件。
 
         「跳过」(ksad_top_toolbar_close_tip) 会提前结束广告导致不发奖，必须排除。
+        strict=True 时（视频广告）只接受右上角区域的候选，避免点到屏幕中央的
+        「关闭」弹窗按钮——实测那一下就白丢一次奖励。
         """
         for n in nodes:
             key = (n["id"] + " " + n["d"]).lower()
@@ -240,10 +246,16 @@ class Bot:
                    or "close_button" in key or "btn_close" in key
                    or "icon_close" in key or "closebtn" in key)
             a = area(n["b"])
-            if hit and 0 < a < 320 * 320:
-                c = center(n["b"])
-                if c:
-                    return c
+            if not (hit and 0 < a < 320 * 320):
+                continue
+            c = center(n["b"])
+            if not c:
+                continue
+            if strict:
+                strong = any(k in key for k in ("close_button", "btn_close", "icon_close", "closebtn"))
+                if not strong and not (c[0] > self.w * 0.55 and c[1] < self.h * 0.22):
+                    continue
+            return c
         return None
 
     def _progress(self, texts: list[str]) -> int | None:
@@ -295,6 +307,8 @@ class Bot:
         swiped_at = -99.0
         dialog_hits = 0
         endcard_taps = 0
+        dump_fails = 0
+        blind = False
         nodes_log = self.out / "ad_nodes.jsonl"
         while time.time() - t0 < budget:
             i += 1
@@ -305,7 +319,19 @@ class Bot:
                 self.note("external", fg=fg)
                 return "external"
 
-            nodes, texts = self.dump_nodes()
+            # 广告页经常等不到 idle，dump 会很慢且注定失败；连续失败就转「盲走」，
+            # 只按时间轴操作，避免一次广告被 dump 拖成 2 分钟。
+            if blind:
+                nodes, texts = [], []
+            else:
+                nodes, texts = self.dump_nodes(timeout=6, attempts=1)
+                if nodes:
+                    dump_fails = 0
+                else:
+                    dump_fails += 1
+                    if dump_fails >= 3:
+                        blind = True
+                        self.note("blind_mode", why=self.last_dump_note[:60])
             if nodes:
                 with nodes_log.open("a", encoding="utf-8") as fh:
                     fh.write(json.dumps({"t": self.stamp(), "act": act, "kind": kind,
@@ -332,12 +358,36 @@ class Bot:
                     time.sleep(1.8)
                 continue
 
-            close = self._find_close(nodes)
+            close = self._find_close(nodes, strict=(kind == "video"))
             if close:
                 self.note("close_button", x=close[0], y=close[1])
                 self.tap(close[0], close[1], "close_button")
                 time.sleep(1.5)
                 continue
+
+            # 盲走模式：视频通常 30~60 秒，按时间轴点 X 收摊，不再等满预算
+            if blind and kind == "video":
+                el = time.time() - t0
+                if el > 55 and endcard_taps < 2:
+                    endcard_taps += 1
+                    self.note("blind_x", n=endcard_taps)
+                    self.tap(*self.pt(*ENDCARD_X), "blind_x")
+                    time.sleep(4.0)
+                    continue
+            # H5 广告对 uiautomator 完全不可见（dump 必超时），继续等只是白烧时间
+            if blind and kind == "h5":
+                el = time.time() - t0
+                if el > 22:
+                    self.note("h5_blind_bail", el=round(el, 1))
+                    self.back("h5_blind_bail")
+                    time.sleep(1.6)
+                    return "timeout"
+
+                if el > 88:
+                    self.note("blind_back")
+                    self.back("blind_back")
+                    time.sleep(1.6)
+                    return "timeout"
 
             # 快手「详情页」版结束页没有 close_button，只能按坐标点右上角 X；
             # 65 秒后才做，避免提前点到「跳过」导致不发奖。
@@ -494,6 +544,7 @@ def main() -> int:
     outdir = Path(args.out) / f"auto-{datetime.now():%Y%m%d-%H%M%S}"
     bot = Bot(adb, serial, outdir, args.act)
     log("=" * 66)
+    log(f"外星仔看广告自动化 v{VERSION}")
     log(f"模式={args.mode} 实际点击={'是' if args.act else '否(dry)'} 输出={outdir}")
     log("=" * 66)
 

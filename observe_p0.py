@@ -196,16 +196,19 @@ def take_screenshot(dev: Device, local: Path) -> bool:
     return ok
 
 
-def dump_ui(dev: Device, local: Path) -> tuple[bool, str]:
-    """uiautomator dump。返回 (是否成功, 原始提示)。"""
+def dump_ui(dev: Device, local: Path, timeout: int = 60, attempts: int = 2) -> tuple[bool, str]:
+    """uiautomator dump。返回 (是否成功, 原始提示)。
+
+    广告页（视频/持续重绘的 WebView）经常等不到 idle，一调用就是十几秒才失败；
+    发广告的循环里要用短超时，否则一次 dump 就把预算吃光。
+    """
     note = ""
-    for attempt in range(2):
-        rc, out = dev.sh(["shell", "uiautomator", "dump", "--compressed", REMOTE_DUMP], timeout=60)
+    for _ in range(max(1, attempts)):
+        rc, out = dev.sh(["shell", "uiautomator", "dump", "--compressed", REMOTE_DUMP], timeout=timeout)
         note = out.strip()
         if rc == 0 and dev.pull(REMOTE_DUMP, local):
             dev.sh(["shell", "rm", "-f", REMOTE_DUMP])
             return True, note
-        # 「could not get idle state」：界面在动（视频/动画），退一步再试
         time.sleep(0.6)
     return False, note
 
