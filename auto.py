@@ -29,7 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import observe_p0 as P  # noqa: E402
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 
 PKG = "com.etalien.booster"
 HOME_ACT = "com.etalien.booster.ui.MainActivity"
@@ -42,7 +42,8 @@ ENDCARD_X = (985, 173)      # 广告结束页右上角 X
 AD_KINDS = [
     ("h5", ("com.byazt.tj.Stub_Standard_Portrait_Activity",)),
     ("jump", ("com.byazt.tj.Stub_Standard_Activity",)),
-    ("video", ("com.kwad.", "com.baidu.mobads", "com.qq.e.", "com.ptg.ptgapi")),
+    ("video", ("com.kwad.", "com.baidu.mobads", "com.qq.e.", "com.ptg.ptgapi",
+                "cj.mobile.")),
 ]
 
 # 绝对禁止点击的文本
@@ -412,6 +413,12 @@ class Bot:
                     self.tap(rw[0], rw[1], f"reward:{rw[2]}")
                     time.sleep(2.5)
                     continue
+
+            # 结束页 X 点了两次还在，基本没救了：不再等满预算，直接杀进程回家
+            if kind == "video" and endcard_taps >= 2 and time.time() - t0 > 90:
+                self.note("endcard_giveup", el=round(time.time() - t0, 1))
+                self.hard_reset()
+                return "timeout"
 
             if record and i % 3 == 0:
                 self.shot(kind)
