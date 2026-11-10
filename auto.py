@@ -29,7 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import observe_p0 as P  # noqa: E402
 
-VERSION = "0.2.1"
+VERSION = "0.3.0"
 
 PKG = "com.etalien.booster"
 HOME_ACT = "com.etalien.booster.ui.MainActivity"
@@ -102,6 +102,7 @@ class Bot:
         self.timeline: list[dict] = []
         self._snap = 0
         self.last_dump_note = ""
+        self._ext_pkg = ""
         self.w, self.h = self._screen()
 
     def _screen(self) -> tuple[int, int]:
@@ -317,6 +318,8 @@ class Bot:
             if fg == PKG and act.endswith("MainActivity") and time.time() - t0 > 2.5:
                 return "closed"
             if fg and not fg.startswith(PKG):
+                # 广告把人跳到京东/淘宝这类应用去了，记下包名，收场时直接杀掉
+                self._ext_pkg = fg
                 self.note("external", fg=fg)
                 return "external"
 
@@ -375,20 +378,18 @@ class Bot:
                     self.tap(*self.pt(*ENDCARD_X), "blind_x")
                     time.sleep(4.0)
                     continue
-            # H5 广告对 uiautomator 完全不可见（dump 必超时），继续等只是白烧时间
-            if blind and kind == "h5":
-                el = time.time() - t0
-                if el > 22:
-                    self.note("h5_blind_bail", el=round(el, 1))
-                    self.back("h5_blind_bail")
-                    time.sleep(1.6)
-                    return "timeout"
-
                 if el > 88:
                     self.note("blind_back")
                     self.back("blind_back")
                     time.sleep(1.6)
                     return "timeout"
+
+            # H5 广告对 uiautomator 完全不可见（dump 必超时），继续等只是白烧时间
+            if blind and kind == "h5" and time.time() - t0 > 22:
+                self.note("h5_blind_bail", el=round(time.time() - t0, 1))
+                self.back("h5_blind_bail")
+                time.sleep(1.6)
+                return "timeout"
 
             # 快手「详情页」版结束页没有 close_button，只能按坐标点右上角 X；
             # 65 秒后才做，避免提前点到「跳过」导致不发奖。
@@ -489,18 +490,33 @@ class Bot:
         if reason == "external":
             self.back("从外部应用返回")
             time.sleep(1.6)
+            if self._ext_pkg and not self.at_home():
+                self.note("kill_external", pkg=self._ext_pkg)
+                self.dev.sh(["shell", "am", "force-stop", self._ext_pkg], timeout=15)
+                self._ext_pkg = ""
+                time.sleep(1.2)
         if not self.at_home():
             self.goto_home()
 
         # 奖励是延迟到账的：最多等 90s；时长与进度任一变好即算成功
         base_p = self._progress(home0["stages"])
         t1 = time.time()
-        got, home1 = False, None
+        got, home1, bad = False, None, 0
         while time.time() - t1 < 90:
             if not self.at_home():
                 self.goto_home()
                 time.sleep(1.5)
             home1 = self.read_home()
+            if not home1.get("valid"):
+                # 被广告踢出去后首页常常读不出数据（显示「— 时 — 分 — 秒」），
+                # 干等等不回来，杀进程重开才能重新拉数据
+                bad += 1
+                if bad >= 3:
+                    self.note("verify_reset")
+                    self.hard_reset()
+                    bad = 0
+                time.sleep(2.0)
+                continue
             cur_p = self._progress(home1["stages"])
             d = None
             if home0["duration"] is not None and home1["duration"] is not None:
