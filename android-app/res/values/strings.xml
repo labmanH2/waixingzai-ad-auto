@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">外星仔自动化</string>
+    <string name="accessibility_desc">自动完成外星仔加速器的看广告领时长任务：只在首页点领取按钮、在广告页点关闭，绝不点击广告内容。</string>
+</resources>
