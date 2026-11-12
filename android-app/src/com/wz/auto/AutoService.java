@@ -36,6 +36,14 @@ public class AutoService extends AccessibilityService {
     private PowerManager.WakeLock wake;
     private volatile String lastClass = "";
     private volatile String lastPkg = "";
+    private volatile long lastKick = 0;
+
+    // 广告素材最爱跳的几家；检测到就秒退，别等下一轮轮询
+    private static final String[] JUMPERS = {
+            "com.jingdong.app.mall", "com.taobao.taobao", "com.tmall.wireless",
+            "com.xunmeng.pinduoduo", "com.tencent.mm", "com.eg.android.AlipayGphone",
+            "com.huawei.browser", "com.android.browser", "com.sina.weibo",
+            "com.ss.android.ugc.aweme", "com.qiyi.video", "tv.danmaku.bili"};
 
     static void note(String s) {
         String line = new SimpleDateFormat("HH:mm:ss", Locale.CHINA).format(new Date()) + "  " + s;
@@ -115,7 +123,20 @@ public class AutoService extends AccessibilityService {
             CharSequence c = e.getClassName();
             if (c != null) lastClass = c.toString();
             CharSequence p = e.getPackageName();
-            if (p != null) lastPkg = p.toString();
+            if (p != null) {
+                lastPkg = p.toString();
+                // 广告跳走的一瞬间就退回来，比 400ms 轮询快得多
+                if (running && SystemClock.uptimeMillis() - lastKick > 1200) {
+                    for (String j : JUMPERS) {
+                        if (j.equals(lastPkg)) {
+                            lastKick = SystemClock.uptimeMillis();
+                            note("秒退外部应用 " + lastPkg);
+                            performGlobalAction(GLOBAL_ACTION_BACK);
+                            break;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -194,17 +215,66 @@ public class AutoService extends AccessibilityService {
             running = false;
             return false;
         }
-        if (h.button == null) {
-            note("首页按钮不可点，等一会儿");
-            sleep(4000);
-            h = ensureHome();
-            if (h == null || h.button == null) return false;
+        // 按首页状态决策：加载中就等，加载失败就点重试，就绪才点领取
+        boolean started = false;
+        int noFill = 0;
+        for (int attempt = 0; attempt < 4 && running && !started; attempt++) {
+            Home cur = (attempt == 0) ? h : readHome();
+            if (cur == null) {
+                sleep(1500);
+                continue;
+            }
+            if (cur.doneToday) {
+                note("首页提示今日已看完：" + cur.label);
+                stopReason = "今日已看完";
+                running = false;
+                return false;
+            }
+            if ("loading".equals(cur.state)) {
+                note("首页状态：广告加载中，等待");
+                setStatus("第 " + round + " 轮 · 等待广告加载");
+                sleep(6000);
+                continue;
+            }
+            if ("failed".equals(cur.state)) {
+                note("首页状态：广告加载失败，点重试");
+            } else if ("ready".equals(cur.state)) {
+                note("首页状态：就绪，点领取");
+            } else {
+                note("首页状态：" + cur.state + " 标签=" + cur.label);
+            }
+            if (cur.button == null) {
+                sleep(2500);
+                continue;
+            }
+            clickNode(cur.button);
+            sleep(900);
+            started = waitAdStart(25000);
+            if (!started) {
+                noFill++;
+                note("没拉到广告（第 " + noFill + " 次）");
+                sleep(1500);
+            }
         }
-        clickNode(h.button);
-        sleep(800);
-
-        if (!waitAdStart(30000)) {
-            note("没拉到广告");
+        if (!started) {
+            // 连续失败通常是广告 SDK 状态坏了：重新拉起 App 再试一次
+            note("连续拉不到广告，重新拉起 App");
+            goHomeScreen();
+            launchApp();
+            sleep(6000);
+            Home again = ensureHome();
+            if (again != null && again.button != null) {
+                clickNode(again.button);
+                sleep(900);
+                started = waitAdStart(25000);
+            }
+        }
+        if (!started) {
+            note("多次重试仍无广告，先停手");
+            stopReason = "广告拉不到";
+            Push.send(this, "外星仔：广告拉不到",
+                    "连续多次没有填充，可能需要手动重启外星仔。已完成 " + done + " 轮。");
+            running = false;
             return false;
         }
         AdKind kind = classify(lastClass);
@@ -218,9 +288,9 @@ public class AutoService extends AccessibilityService {
             sleep(1600);
         }
         // 没有 force-stop 权限，只能先连按返回把广告页退掉，再重新拉起
-        for (int k = 0; k < 3 && !atHome() && running; k++) {
+        for (int k = 0; k < 5 && !atHome() && running; k++) {
             back();
-            sleep(900);
+            sleep(1000);
         }
         if (!atHome()) {
             goHomeScreen();
@@ -241,6 +311,7 @@ public class AutoService extends AccessibilityService {
         List<String> stages = new ArrayList<>();
         AccessibilityNodeInfo button;
         String label = "";
+        String state = "unknown"; // ready / loading / failed / done / none
         boolean doneToday = false;
 
         String durationText() {
@@ -317,6 +388,18 @@ public class AutoService extends AccessibilityService {
             }
         }
         h.button = s.submit;
+        String lb = h.label;
+        if (h.doneToday || lb.contains("已看完") || lb.contains("上限") || lb.contains("已领")) {
+            h.state = "done";
+        } else if (lb.contains("加载中") || lb.contains("稍等")) {
+            h.state = "loading";
+        } else if (lb.contains("加载失败") || lb.contains("重试")) {
+            h.state = "failed";
+        } else if (lb.contains("领时长") && s.submit != null) {
+            h.state = "ready";
+        } else {
+            h.state = "none";
+        }
         return h;
     }
 
@@ -363,12 +446,15 @@ public class AutoService extends AccessibilityService {
 
     // ---------------- 广告 ----------------
 
-    enum AdKind {VIDEO, H5, CJ, OTHER}
+    enum AdKind {VIDEO, BAIDU, H5, CJ, OTHER}
 
     private AdKind classify(String cls) {
         if (cls == null) return AdKind.OTHER;
         String c = cls.toLowerCase(Locale.ROOT);
-        if (c.contains("byazt") || c.contains("mobad") || c.contains("stub_standard")) return AdKind.H5;
+        // 真正的 H5 落地页：百青藤 Stub_Standard（对无障碍完全不可见）
+        if (c.contains("byazt") || c.contains("stub_standard")) return AdKind.H5;
+        // 百度 MobRewardVideoActivity 是视频，但页面热点多，点了会跳京东，所以不点 X
+        if (c.contains("mobad") || c.contains("mobreward")) return AdKind.BAIDU;
         if (c.contains("cj.mobile")) return AdKind.CJ;
         if (c.contains("kwad") || c.contains("qq.e") || c.contains("ptg") || c.contains("reward")) return AdKind.VIDEO;
         return AdKind.OTHER;
@@ -376,16 +462,11 @@ public class AutoService extends AccessibilityService {
 
     private boolean waitAdStart(long ms) {
         long t0 = SystemClock.uptimeMillis();
-        int gone = 0;
         while (SystemClock.uptimeMillis() - t0 < ms && running) {
-            if (!atHome()) return true;
+            // 广告 Activity 起来后 lastClass 就不再是 MainActivity
+            if (!lastClass.endsWith("MainActivity")) return true;
             Snap s = snap();
-            if (s.submit == null) {
-                gone++;
-                if (gone >= 2) return true;
-            } else {
-                gone = 0;
-            }
+            if (s.root != null && !s.pkg.isEmpty() && !PKG.equals(s.pkg)) return true;
             sleep(400);
         }
         return false;
@@ -394,9 +475,14 @@ public class AutoService extends AccessibilityService {
     private String handleAd(AdKind kind) {
         long t0 = SystemClock.uptimeMillis();
         int taps = 0, dialogs = 0;
+        long lastBeat = -20000;
         while (running) {
             long el = SystemClock.uptimeMillis() - t0;
             setStatus("第 " + round + " 轮 · 广告中 " + (el / 1000) + "s · " + kind);
+            if (el - lastBeat > 20000) {
+                lastBeat = el;
+                note("心跳 " + (el / 1000) + "s · " + kind);
+            }
             if (el > 110000) break;
             Snap s = snap();
             if (s.root == null) {
@@ -440,6 +526,12 @@ public class AutoService extends AccessibilityService {
             }
             if (kind == AdKind.H5 && el > 22000) {
                 note("H5 看不见，放弃");
+                back();
+                sleep(1500);
+                return "timeout";
+            }
+            if (kind == AdKind.BAIDU && el > 45000) {
+                note("百度视频广告 45 秒收场");
                 back();
                 sleep(1500);
                 return "timeout";
