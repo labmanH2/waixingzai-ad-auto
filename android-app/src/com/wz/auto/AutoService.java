@@ -100,6 +100,7 @@ public class AutoService extends AccessibilityService {
     @Override
     protected void onServiceConnected() {
         super.onServiceConnected();
+        boolean wasRunning = running;
         INST = this;
         PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
         if (pm != null) {
@@ -107,13 +108,14 @@ public class AutoService extends AccessibilityService {
                     | PowerManager.ACQUIRE_CAUSES_WAKEUP, "wzauto:run");
             wake.setReferenceCounted(false);
         }
-        note("无障碍服务已连接，可以开始");
+        note(wasRunning ? "无障碍服务重连，任务继续" : "无障碍服务已连接，可以开始");
     }
 
     @Override
     public boolean onUnbind(Intent intent) {
         INST = null;
-        running = false;
+        // 注意：这里不要置 running=false。华为会周期性重建无障碍服务，
+        // 一旦清掉标志，跑到一半的任务会被误判成「已结束」。
         return super.onUnbind(intent);
     }
 
@@ -249,7 +251,7 @@ public class AutoService extends AccessibilityService {
             }
             clickNode(cur.button);
             sleep(900);
-            started = waitAdStart(25000);
+            started = waitAdStart(40000);
             if (!started) {
                 noFill++;
                 note("没拉到广告（第 " + noFill + " 次）");
@@ -266,7 +268,7 @@ public class AutoService extends AccessibilityService {
             if (again != null && again.button != null) {
                 clickNode(again.button);
                 sleep(900);
-                started = waitAdStart(25000);
+                started = waitAdStart(40000);
             }
         }
         if (!started) {
