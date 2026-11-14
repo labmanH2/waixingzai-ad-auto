@@ -3,6 +3,8 @@ package com.wz.auto;
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
 import android.content.Intent;
+import android.net.Uri;
+import android.provider.Settings;
 import android.graphics.Path;
 import android.graphics.Rect;
 import android.os.PowerManager;
@@ -328,6 +330,13 @@ public class AutoService extends AccessibilityService {
 
     private Home ensureHome() {
         for (int i = 0; i < 5 && running; i++) {
+            if (i == 2 && !atHome()) {
+                // 两轮都回不去，多半是广告 Activity 卡住了，直接强停重开
+                if (forceStopViaSettings()) {
+                    Home h = readHome();
+                    if (h != null && h.duration >= 0) return h;
+                }
+            }
             if (!atHome()) {
                 goHomeScreen();
                 launchApp();
@@ -373,6 +382,55 @@ public class AutoService extends AccessibilityService {
         sleep(600);
     }
 
+    /**
+     * App 没有 force-stop 权限，但「设置 → 应用信息」里有「强行停止」按钮。
+     * 广告 Activity 赖在最上层时，这是唯一能真正把外星仔杀干净的办法。
+     */
+    private boolean forceStopViaSettings() {
+        note("借系统设置强停外星仔");
+        try {
+            Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+            i.setData(Uri.parse("package:" + PKG));
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Throwable t) {
+            note("打开应用信息页失败：" + t);
+            return false;
+        }
+        sleep(2200);
+        boolean clicked = false;
+        for (int k = 0; k < 8 && !clicked; k++) {
+            Snap s = snap();
+            if (s.root == null) {
+                sleep(700);
+                continue;
+            }
+            for (String t : new String[]{"强行停止", "强制停止"}) {
+                if (clickText(s, t)) {
+                    clicked = true;
+                    break;
+                }
+            }
+            if (!clicked) sleep(700);
+        }
+        if (!clicked) {
+            note("没找到「强行停止」按钮，放弃");
+            goHomeScreen();
+            return false;
+        }
+        sleep(1400);
+        // 确认弹窗
+        Snap s2 = snap();
+        if (!clickText(s2, "确定")) clickText(s2, "强行停止");
+        sleep(1200);
+        note("已强行停止外星仔");
+        goHomeScreen();
+        sleep(800);
+        launchApp();
+        sleep(3000);
+        return true;
+    }
+
     private Home readHome() {
         Snap s = snap();
         if (s.root == null) return null;
@@ -409,14 +467,19 @@ public class AutoService extends AccessibilityService {
         setStatus("第 " + round + " 轮 · 等到账");
         long t0 = SystemClock.uptimeMillis();
         int baseProgress = progressOf(before.stages);
+        int relaunch = 0;
         while (SystemClock.uptimeMillis() - t0 < 90000 && running) {
             Home now = readHome();
             if (now == null || now.duration < 0) {
-                if (SystemClock.uptimeMillis() - t0 > 20000) {
-                    note("首页读不出数据，重启 App 重新拉");
+                if (SystemClock.uptimeMillis() - t0 > 20000 && relaunch < 2) {
+                    relaunch++;
+                    note("首页读不出数据，重启 App 重新拉（" + relaunch + "/2）");
                     goHomeScreen();
                     launchApp();
                     sleep(3000);
+                } else if (relaunch >= 2) {
+                    note("首页始终读不出，放弃本轮校验");
+                    return false;
                 }
                 sleep(2000);
                 continue;
@@ -478,6 +541,7 @@ public class AutoService extends AccessibilityService {
         long t0 = SystemClock.uptimeMillis();
         int taps = 0, dialogs = 0;
         long lastBeat = -20000;
+        int lastCloseX = -1, lastCloseY = -1, sameClose = 0;
         while (running) {
             long el = SystemClock.uptimeMillis() - t0;
             setStatus("第 " + round + " 轮 · 广告中 " + (el / 1000) + "s · " + kind);
@@ -520,10 +584,20 @@ public class AutoService extends AccessibilityService {
             if (kind != AdKind.CJ) {
                 Pt c = findClose(s);
                 if (c != null) {
-                    note("点关闭控件 " + c.x + "," + c.y);
-                    tapXY(c.x, c.y);
-                    sleep(1400);
-                    continue;
+                    if (c.x == lastCloseX && c.y == lastCloseY) {
+                        sameClose++;
+                    } else {
+                        sameClose = 0;
+                        lastCloseX = c.x;
+                        lastCloseY = c.y;
+                    }
+                    // 同一个坐标点两次没反应就是假关闭，别再连点
+                    if (sameClose < 2) {
+                        note("点关闭控件 " + c.x + "," + c.y);
+                        tapXY(c.x, c.y);
+                        sleep(1400);
+                        continue;
+                    }
                 }
             }
             if (kind == AdKind.H5 && el > 22000) {
