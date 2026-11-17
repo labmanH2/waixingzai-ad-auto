@@ -33,6 +33,7 @@ public class AutoService extends AccessibilityService {
     static volatile AutoService INST = null;
     static final ArrayDeque<String> LOG = new ArrayDeque<>();
     static volatile int done = 0, ok = 0;
+    private volatile int failStreak = 0;
 
     private volatile Thread worker;
     private PowerManager.WakeLock wake;
@@ -159,6 +160,7 @@ public class AutoService extends AccessibilityService {
         done = 0;
         ok = 0;
         round = 0;
+        failStreak = 0;
         stopReason = "正常结束";
         Overlay.show(this);
         setStatus("已启动，共 " + rounds + " 轮");
@@ -179,7 +181,21 @@ public class AutoService extends AccessibilityService {
                             good = false;
                         }
                         done = i;
-                        if (good) ok++;
+                        if (good) {
+                            ok++;
+                            failStreak = 0;
+                        } else {
+                            failStreak++;
+                            if (failStreak >= 3) {
+                                note("连续 " + failStreak + " 轮失败，先停手等你处理");
+                                stopReason = "连续失败";
+                                Push.send(AutoService.this, "外星仔：连续失败已暂停",
+                                        "连续 " + failStreak + " 轮没跑通，可能是外星仔卡住了。\n"
+                                                + AutoService.dumpLogTail(8));
+                                running = false;
+                                break;
+                            }
+                        }
                         if (!running) break;
                         if (i < rounds) sleep(good ? 25000 + rnd(30000) : 15000);
                     }
@@ -330,25 +346,58 @@ public class AutoService extends AccessibilityService {
 
     private Home ensureHome() {
         for (int i = 0; i < 5 && running; i++) {
-            if (i == 2 && !atHome()) {
-                // 两轮都回不去，多半是广告 Activity 卡住了，直接强停重开
-                if (forceStopViaSettings()) {
-                    Home h = readHome();
-                    if (h != null && h.duration >= 0) return h;
-                }
-            }
             if (!atHome()) {
                 goHomeScreen();
                 launchApp();
             }
             long t0 = SystemClock.uptimeMillis();
+            boolean refreshed = false;
             while (SystemClock.uptimeMillis() - t0 < 9000 && running) {
                 Home h = readHome();
                 if (h != null && h.duration >= 0) return h;
+                if (!refreshed) {
+                    refreshed = true;
+                    Snap ss = snap();
+                    if (ss.root != null) refreshHome(ss);
+                    sleep(1500);
+                    continue;
+                }
                 sleep(600);
             }
         }
         return null;
+    }
+
+    /**
+     * 「开启计时」确认框会挡住整个首页，还会消耗用户的加速时长。
+     * 只点「取消」，永远不点「确定开启」。
+     */
+    private boolean dismissBlocker(Snap s) {
+        String joined = TextUtils.join(" ", s.texts);
+        boolean startTiming = joined.contains("确定要开启计时吗") || joined.contains("开启计时");
+        boolean tip = joined.contains("温馨提示");
+        if (startTiming || tip) {
+            if (clickText(s, "取消")) {
+                note("关掉遮挡弹窗「" + (startTiming ? "开启计时" : "温馨提示") + "」");
+                return true;
+            }
+            note("发现弹窗但没找到取消按钮，按返回");
+            back();
+            return true;
+        }
+        return false;
+    }
+
+    /** 时长显示成「— 时 — 分 — 秒」时，点一下右上角「每日刷新」重新拉数据。 */
+    private boolean refreshHome(Snap s) {
+        if (clickText(s, "每日刷新")) {
+            note("时长读不出，点「每日刷新」重拉");
+            return true;
+        }
+        // 按文本找不到就按坐标兜底（1080x2340 基准）
+        tapXY(cx(892), cy(692));
+        note("时长读不出，按坐标点「每日刷新」");
+        return true;
     }
 
     private boolean atHome() {
@@ -397,21 +446,19 @@ public class AutoService extends AccessibilityService {
             note("打开应用信息页失败：" + t);
             return false;
         }
-        sleep(2200);
         boolean clicked = false;
-        for (int k = 0; k < 8 && !clicked; k++) {
+        for (int k = 0; k < 14 && !clicked; k++) {
+            sleep(800);
             Snap s = snap();
-            if (s.root == null) {
-                sleep(700);
-                continue;
-            }
+            if (s.root == null) continue;
+            // 等设置页真的到前台，别在还停在外星仔时瞎找
+            if (!s.pkg.contains("settings")) continue;
             for (String t : new String[]{"强行停止", "强制停止"}) {
                 if (clickText(s, t)) {
                     clicked = true;
                     break;
                 }
             }
-            if (!clicked) sleep(700);
         }
         if (!clicked) {
             note("没找到「强行停止」按钮，放弃");
@@ -434,6 +481,11 @@ public class AutoService extends AccessibilityService {
     private Home readHome() {
         Snap s = snap();
         if (s.root == null) return null;
+        if (dismissBlocker(s)) {
+            sleep(1200);
+            s = snap();
+            if (s.root == null) return null;
+        }
         Home h = new Home();
         h.duration = parseDuration(s.texts);
         for (String t : s.texts) {
@@ -730,11 +782,32 @@ public class AutoService extends AccessibilityService {
 
     private Snap snap() {
         Snap s = new Snap();
-        AccessibilityNodeInfo root;
+        AccessibilityNodeInfo root = null;
         try {
             root = getRootInActiveWindow();
-        } catch (Throwable t) {
-            return s;
+        } catch (Throwable ignored) {
+        }
+        // 有时活跃窗口是别的 App 或系统窗口（例如被设置页盖住），
+        // 这时从窗口列表里找外星仔自己的窗口，别一头撞死
+        boolean weak = root == null;
+        if (root != null) {
+            CharSequence p = root.getPackageName();
+            if (p == null || root.getChildCount() == 0) weak = true;
+        }
+        if (weak) {
+            try {
+                java.util.List<android.view.accessibility.AccessibilityWindowInfo> wins = getWindows();
+                for (android.view.accessibility.AccessibilityWindowInfo w : wins) {
+                    AccessibilityNodeInfo r = w.getRoot();
+                    if (r == null) continue;
+                    CharSequence p = r.getPackageName();
+                    if (p != null && PKG.contentEquals(p)) {
+                        root = r;
+                        break;
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
         }
         if (root == null) return s;
         s.root = root;
@@ -758,6 +831,20 @@ public class AutoService extends AccessibilityService {
     }
 
     private int parseDuration(List<String> texts) {
+        // Flutter 有时把「54 时 20 分 32 秒」合并成一个节点，先按整串匹配
+        java.util.regex.Pattern merged = java.util.regex.Pattern.compile(
+                "(\\d+)\\s*时\\s*(\\d+)\\s*分\\s*(\\d+)\\s*秒");
+        for (String t : texts) {
+            java.util.regex.Matcher m = merged.matcher(t);
+            if (m.find()) {
+                try {
+                    return Integer.parseInt(m.group(1)) * 3600
+                            + Integer.parseInt(m.group(2)) * 60
+                            + Integer.parseInt(m.group(3));
+                } catch (NumberFormatException ignored) {
+                }
+            }
+        }
         int total = 0;
         boolean found = false;
         for (int i = 1; i < texts.size(); i++) {

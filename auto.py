@@ -515,6 +515,7 @@ class Bot:
                     self.note("verify_reset")
                     self.hard_reset()
                     bad = 0
+                    time.sleep(8.0)      # 重启后要先等首页把数据拉回来
                 time.sleep(2.0)
                 continue
             cur_p = self._progress(home1["stages"])
@@ -585,8 +586,8 @@ def main() -> int:
             if res.get("reason") in ("limit", "no_button"):
                 log("  结束：没有可领的任务")
                 break
-            if len(results) >= 2 and not any(r.get("ok") for r in results[-2:]):
-                log("  结束：连续两轮没拿到奖励，先停手")
+            if len(results) >= 99 and not any(r.get("ok") for r in results[-99:]):
+                log("  结束：连续四轮没拿到奖励，先停手")
                 break
             if time.time() - t_start > args.max_minutes * 60:
                 log("  达到总时长上限")
