@@ -329,7 +329,7 @@ public class AutoService extends AccessibilityService {
     static class Home {
         int duration = -1;
         List<String> stages = new ArrayList<>();
-        AccessibilityNodeInfo button;
+        NodeV button;
         String label = "";
         String state = "unknown"; // ready / loading / failed / done / none
         boolean doneToday = false;
@@ -346,6 +346,13 @@ public class AutoService extends AccessibilityService {
 
     private Home ensureHome() {
         for (int i = 0; i < 5 && running; i++) {
+            if (i == 2) {
+                // 两轮都回不去，按用户的思路：退到后台杀进程再重开
+                if (killBoosterBackground()) {
+                    Home h = readHome();
+                    if (h != null && h.duration >= 0) return h;
+                }
+            }
             if (!atHome()) {
                 goHomeScreen();
                 launchApp();
@@ -358,8 +365,15 @@ public class AutoService extends AccessibilityService {
                 if (!refreshed) {
                     refreshed = true;
                     Snap ss = snap();
-                    if (ss.root != null) refreshHome(ss);
+                    if (ss.ok) refreshHome(ss);
                     sleep(1500);
+                    Home h2 = readHome();
+                    if (h2 != null && h2.duration >= 0) return h2;
+                    // 还读不出就来一次应用内下拉刷新
+                    pullToRefresh();
+                    sleep(2500);
+                    Home h3 = readHome();
+                    if (h3 != null && h3.duration >= 0) return h3;
                     continue;
                 }
                 sleep(600);
@@ -418,12 +432,51 @@ public class AutoService extends AccessibilityService {
         try {
             Intent i = getPackageManager().getLaunchIntentForPackage(PKG);
             if (i == null) return;
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP
-                    | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            // CLEAR_TASK 会把外星仔的任务栈清空重来，等效于把卡住的广告 Activity 扔掉
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK
+                    | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
             startActivity(i);
         } catch (Throwable t) {
             note("拉起失败：" + t);
         }
+    }
+
+    /**
+     * 把外星仔退到后台再杀它的进程，然后重新拉起。
+     * 这是普通 App 能拿到的最接近 force-stop 的手段（广告 Activity 卡住时靠它救场）。
+     */
+    private boolean killBoosterBackground() {
+        try {
+            goHomeScreen();
+            sleep(1800);
+            android.app.ActivityManager am =
+                    (android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE);
+            if (am == null) return false;
+            am.killBackgroundProcesses(PKG);
+            note("已杀外星仔后台进程");
+            sleep(2500);
+            launchApp();
+            sleep(4000);
+            return true;
+        } catch (Throwable t) {
+            note("杀后台失败：" + t);
+            return false;
+        }
+    }
+
+    /** 应用内下拉刷新：强制外星仔重新拉一次数据，也会让语义树重绘。 */
+    private void pullToRefresh() {
+        int x = cx(540);
+        int y0 = cy(700);
+        int y1 = cy(1500);
+        Path path = new Path();
+        path.moveTo(x, y0);
+        path.lineTo(x, y1);
+        GestureDescription.StrokeDescription st =
+                new GestureDescription.StrokeDescription(path, 0, 420);
+        GestureDescription g = new GestureDescription.Builder().addStroke(st).build();
+        dispatchGesture(g, null, null);
+        note("下拉刷新");
     }
 
     private void goHomeScreen() {
@@ -450,7 +503,7 @@ public class AutoService extends AccessibilityService {
         for (int k = 0; k < 14 && !clicked; k++) {
             sleep(800);
             Snap s = snap();
-            if (s.root == null) continue;
+            if (!s.ok) continue;
             // 等设置页真的到前台，别在还停在外星仔时瞎找
             if (!s.pkg.contains("settings")) continue;
             for (String t : new String[]{"强行停止", "强制停止"}) {
@@ -480,11 +533,11 @@ public class AutoService extends AccessibilityService {
 
     private Home readHome() {
         Snap s = snap();
-        if (s.root == null) return null;
+        if (!s.ok) return null;
         if (dismissBlocker(s)) {
             sleep(1200);
             s = snap();
-            if (s.root == null) return null;
+            if (!s.ok) return null;
         }
         Home h = new Home();
         h.duration = parseDuration(s.texts);
@@ -583,7 +636,7 @@ public class AutoService extends AccessibilityService {
             // 广告 Activity 起来后 lastClass 就不再是 MainActivity
             if (!lastClass.endsWith("MainActivity")) return true;
             Snap s = snap();
-            if (s.root != null && !s.pkg.isEmpty() && !PKG.equals(s.pkg)) return true;
+            if (s.ok && !s.pkg.isEmpty() && !PKG.equals(s.pkg)) return true;
             sleep(400);
         }
         return false;
@@ -603,7 +656,7 @@ public class AutoService extends AccessibilityService {
             }
             if (el > 110000) break;
             Snap s = snap();
-            if (s.root == null) {
+            if (!s.ok) {
                 sleep(400);
                 continue;
             }
@@ -698,22 +751,17 @@ public class AutoService extends AccessibilityService {
     private Pt findClose(Snap s) {
         int w = getResources().getDisplayMetrics().widthPixels;
         int h = getResources().getDisplayMetrics().heightPixels;
-        for (int i = 0; i < s.nodes.size(); i++) {
-            AccessibilityNodeInfo n = s.nodes.get(i);
-            String id = n.getViewIdResourceName() == null ? "" : n.getViewIdResourceName().toLowerCase(Locale.ROOT);
-            String d = n.getContentDescription() == null ? "" : n.getContentDescription().toString();
-            String t = n.getText() == null ? "" : n.getText().toString();
+        for (NodeV n : s.nodes) {
+            String id = n.id.toLowerCase(Locale.ROOT);
+            String d = n.d;
+            String t = n.t;
             if (t.contains("跳过") || id.contains("close_tip") || id.contains("skip")) continue;
             boolean hit = t.contains("关闭") || d.contains("关闭") || id.contains("close_button")
                     || id.contains("btn_close") || id.contains("icon_close") || id.contains("closebtn");
             if (!hit) continue;
-            Rect r = new Rect();
-            n.getBoundsInScreen(r);
-            long area = (long) r.width() * r.height();
-            if (area <= 0 || area > 320 * 320) continue;
-            int cxp = r.centerX(), cyp = r.centerY();
-            if (!(cxp > w * 0.55f && cyp < h * 0.22f)) continue; // 只认右上角
-            return new Pt(cxp, cyp);
+            if (n.area <= 0 || n.area > 320 * 320) continue;
+            if (!(n.x > w * 0.55f && n.y < h * 0.22f)) continue; // 只认右上角
+            return new Pt(n.x, n.y);
         }
         return null;
     }
@@ -746,38 +794,36 @@ public class AutoService extends AccessibilityService {
         dispatchGesture(g, null, null);
     }
 
-    private boolean clickNode(AccessibilityNodeInfo n) {
-        if (n == null) return false;
-        AccessibilityNodeInfo cur = n;
-        for (int i = 0; i < 5 && cur != null; i++) {
-            if (cur.isClickable() && cur.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true;
-            cur = cur.getParent();
-        }
-        Rect r = new Rect();
-        n.getBoundsInScreen(r);
-        if (r.width() > 0) {
-            tapXY(r.centerX(), r.centerY());
-            return true;
-        }
-        return false;
+    private boolean clickNode(NodeV n) {
+        if (n == null || n.x < 0) return false;
+        tapXY(n.x, n.y);
+        return true;
     }
 
     private boolean clickText(Snap s, String text) {
-        for (AccessibilityNodeInfo n : s.nodes) {
-            CharSequence t = n.getText();
-            if (t != null && t.toString().equals(text)) {
-                if (clickNode(n)) return true;
-            }
+        for (NodeV n : s.nodes) {
+            if (n.t.equals(text) && clickNode(n)) return true;
         }
         return false;
     }
 
+    /** 节点的值拷贝：只留文字、id、中心点和面积，不再持有 AccessibilityNodeInfo。 */
+    static class NodeV {
+        String t = "";
+        String d = "";
+        String id = "";
+        int x = -1;
+        int y = -1;
+        int area = 0;
+        boolean clickable = false;
+    }
+
     static class Snap {
-        AccessibilityNodeInfo root;
+        boolean ok = false;
         String pkg = "";
         final List<String> texts = new ArrayList<>();
-        final List<AccessibilityNodeInfo> nodes = new ArrayList<>();
-        AccessibilityNodeInfo submit;
+        final List<NodeV> nodes = new ArrayList<>();
+        NodeV submit;
     }
 
     private Snap snap() {
@@ -810,23 +856,72 @@ public class AutoService extends AccessibilityService {
             }
         }
         if (root == null) return s;
-        s.root = root;
+        s.ok = true;
         CharSequence p = root.getPackageName();
         if (p != null) s.pkg = p.toString();
         walk(root, s, 0);
+        // 活跃窗口不是首页（例如广告 Activity 盖在上面）时，翻窗口列表把首页找出来。
+        // 只读不点，点仍然走手势落在最上层。
+        if (s.submit == null && PKG.equals(s.pkg)) {
+            Snap home = snapFromWindowWithSubmit();
+            if (home != null) return home;
+        }
         return s;
+    }
+
+    private Snap snapFromWindowWithSubmit() {
+        try {
+            java.util.List<android.view.accessibility.AccessibilityWindowInfo> wins = getWindows();
+            StringBuilder dbg = new StringBuilder();
+            for (android.view.accessibility.AccessibilityWindowInfo w : wins) {
+                AccessibilityNodeInfo r0 = w.getRoot();
+                String pk = r0 == null ? "null" : String.valueOf(r0.getPackageName());
+                dbg.append(pk.replace("com.", "")).append("(t").append(w.getType()).append(") ");
+            }
+            note("窗口扫描: " + dbg);
+            for (android.view.accessibility.AccessibilityWindowInfo w : wins) {
+                AccessibilityNodeInfo r = w.getRoot();
+                if (r == null) continue;
+                CharSequence p = r.getPackageName();
+                if (p == null || !PKG.contentEquals(p)) continue;
+                Snap cand = new Snap();
+                cand.ok = true;
+                cand.pkg = p.toString();
+                walk(r, cand, 0);
+                if (cand.submit != null) return cand;
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
     }
 
     private void walk(AccessibilityNodeInfo n, Snap s, int depth) {
         if (n == null || depth > 40) return;
+        NodeV v = new NodeV();
         CharSequence t = n.getText();
-        if (t != null && t.length() > 0) s.texts.add(t.toString());
+        if (t != null) v.t = t.toString();
+        CharSequence d = n.getContentDescription();
+        if (d != null) v.d = d.toString();
         String id = n.getViewIdResourceName();
-        if (id != null && id.endsWith("UIADSubmit")) s.submit = n;
-        s.nodes.add(n);
-        for (int i = 0; i < n.getChildCount(); i++) {
+        if (id != null) v.id = id;
+        Rect r = new Rect();
+        n.getBoundsInScreen(r);
+        v.x = r.centerX();
+        v.y = r.centerY();
+        v.area = r.width() * r.height();
+        v.clickable = n.isClickable();
+        if (!v.t.isEmpty()) s.texts.add(v.t);
+        if (id != null && id.endsWith("UIADSubmit")) s.submit = v;
+        s.nodes.add(v);
+        int cnt = n.getChildCount();
+        for (int i = 0; i < cnt; i++) {
             AccessibilityNodeInfo c = n.getChild(i);
-            if (c != null) walk(c, s, depth + 1);
+            if (c == null) continue;
+            walk(c, s, depth + 1);
+            try {
+                c.recycle();
+            } catch (Throwable ignored) {
+            }
         }
     }
 

@@ -22,7 +22,7 @@ Write-Host "== aapt2 link =="
     -I "$PLATFORM" `
     --manifest "$PROJ\AndroidManifest.xml" `
     --min-sdk-version 24 --target-sdk-version 30 `
-    --version-code 11 --version-name 0.5.2 `
+    --version-code 15 --version-name 0.8.0 `
     "$BUILD\res.zip"
 if ($LASTEXITCODE -ne 0) { throw "aapt2 link failed" }
 
