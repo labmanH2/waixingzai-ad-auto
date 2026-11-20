@@ -61,11 +61,27 @@ public class Overlay {
         });
     }
 
+    static boolean isShown() {
+        // 只看引用不够：窗口可能已经被系统摘掉，必须确认还挂在屏幕上
+        return tv != null && tv.isAttachedToWindow() && wm != null;
+    }
+
     static void set(final String text) {
         UI.post(new Runnable() {
             @Override
             public void run() {
-                if (tv != null) tv.setText(text);
+                if (tv == null) return;
+                if (!tv.isAttachedToWindow()) {
+                    // 被系统摘掉了，清掉引用，等上层补挂
+                    try {
+                        if (wm != null) wm.removeView(tv);
+                    } catch (Throwable ignored) {
+                    }
+                    tv = null;
+                    wm = null;
+                    return;
+                }
+                tv.setText(text);
             }
         });
     }

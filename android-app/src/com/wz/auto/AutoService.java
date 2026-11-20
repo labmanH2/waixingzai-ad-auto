@@ -7,6 +7,9 @@ import android.net.Uri;
 import android.provider.Settings;
 import android.graphics.Path;
 import android.graphics.Rect;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.text.TextUtils;
@@ -36,10 +39,24 @@ public class AutoService extends AccessibilityService {
     private volatile int failStreak = 0;
 
     private volatile Thread worker;
+    private HandlerThread bgThread;
+    private volatile Handler bgHandler;
+    private int beatSec = 0;
+    private final Handler beatH = new Handler(Looper.getMainLooper());
+    private final Runnable beatR = new Runnable() {
+        @Override
+        public void run() {
+            if (!running) return;
+            beatSec++;
+            refreshOverlay("外星仔 #" + beatSec + "\n" + STATUS + "\n成功 " + ok + " / " + done);
+            beatH.postDelayed(this, 1000);
+        }
+    };
     private PowerManager.WakeLock wake;
     private volatile String lastClass = "";
     private volatile String lastPkg = "";
     private volatile long lastKick = 0;
+    private volatile long lastScanLog = 0;
 
     // 广告素材最爱跳的几家；检测到就秒退，别等下一轮轮询
     private static final String[] JUMPERS = {
@@ -78,12 +95,30 @@ public class AutoService extends AccessibilityService {
     }
 
     public static volatile int round = 0;
+    static volatile int TARGET = 21;
+    private static volatile boolean ACTIVE = false;
+    private static volatile long LAST_SAVE = 0;
+    private volatile boolean workerExit = false;
+    private android.content.SharedPreferences prefs;
+    private int deadBeats = 0;
+    private int noFillRounds = 0;
+    private long restartGuardAt = 0;
     public static volatile String STATUS = "空闲";
     static volatile String stopReason = "正常结束";
 
+    /** 刷新悬浮窗：掉线了自动补挂，再写文字。 */
+    static void refreshOverlay(String text) {
+        try {
+            if (!Overlay.isShown() && INST != null) Overlay.show(INST);
+        } catch (Throwable ignored) {
+        }
+        Overlay.set(text);
+    }
+
     static void setStatus(String s) {
         STATUS = s;
-        Overlay.set("外星仔自动化\n" + s);
+        // 悬浮窗可能因为服务重建而丢失，这里顺手补挂回来
+        refreshOverlay("外星仔自动化\n" + s);
     }
 
     static void startRun(int rounds) {
@@ -105,13 +140,51 @@ public class AutoService extends AccessibilityService {
         super.onServiceConnected();
         boolean wasRunning = running;
         INST = this;
+        if (bgThread == null) {
+            bgThread = new HandlerThread("wz-bg");
+            bgThread.start();
+            bgHandler = new Handler(bgThread.getLooper());
+        }
         PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
         if (pm != null) {
             wake = pm.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK
                     | PowerManager.ACQUIRE_CAUSES_WAKEUP, "wzauto:run");
             wake.setReferenceCounted(false);
         }
+        prefs = getSharedPreferences("run", MODE_PRIVATE);
+        boolean savedRunning = prefs.getBoolean("running", false);
         note(wasRunning ? "无障碍服务重连，任务继续" : "无障碍服务已连接，可以开始");
+        // 切开关重建连接后，进程还在、进度也在静态变量里，直接续跑
+        if (wasRunning && (worker == null || !worker.isAlive())) {
+            note("连接已恢复，" + 4 + " 秒后从第 " + (done + 1) + " 轮继续");
+            final int t = TARGET, d = done, o2 = ok;
+            beatH.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    if (worker != null && worker.isAlive()) {
+                        note("旧线程还没退，2 秒后再试");
+                        beatH.postDelayed(this, 2000);
+                        return;
+                    }
+                    resume(t, d, o2);
+                }
+            }, 4000);
+            return;
+        }
+        long savedAt = prefs.getLong("savedAt", 0);
+        boolean fresh = System.currentTimeMillis() - savedAt < 10 * 60 * 1000L;
+        if (!wasRunning && savedRunning && !fresh) {
+            note("发现很久以前的未完成任务，直接作废");
+            prefs.edit().putBoolean("running", false).apply();
+        }
+        if (!wasRunning && savedRunning && fresh) {
+            // 上一次进程因为连接失效被自己杀掉了，这里自动接着跑
+            int target = prefs.getInt("target", 21);
+            int savedDone = prefs.getInt("done", 0);
+            int savedOk = prefs.getInt("ok", 0);
+            note("检测到未完成的任务（已跑 " + savedDone + "/" + target + "），自动续跑");
+            resume(target, savedDone, savedOk);
+        }
     }
 
     @Override
@@ -136,7 +209,17 @@ public class AutoService extends AccessibilityService {
                         if (j.equals(lastPkg)) {
                             lastKick = SystemClock.uptimeMillis();
                             note("秒退外部应用 " + lastPkg);
-                            performGlobalAction(GLOBAL_ACTION_BACK);
+                            // performGlobalAction 是同步跨进程调用，直接放在事件回调里
+                            // 会把主线程（包括悬浮窗刷新）卡住，必须挪到后台线程
+                            final Handler h = bgHandler;
+                            if (h != null) {
+                                h.post(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        performGlobalAction(GLOBAL_ACTION_BACK);
+                                    }
+                                });
+                            }
                             break;
                         }
                     }
@@ -152,24 +235,34 @@ public class AutoService extends AccessibilityService {
     // ---------------- 主循环 ----------------
 
     private void begin(final int rounds) {
-        if (worker != null && worker.isAlive()) {
-            note("已经在跑了");
+        if (ACTIVE || (worker != null && worker.isAlive())) {
+            note("已经有任务在跑，忽略这次点击");
             return;
         }
+        ACTIVE = true;
         running = true;
         done = 0;
         ok = 0;
         round = 0;
         failStreak = 0;
+        deadBeats = 0;
+        workerExit = false;
+        TARGET = rounds;
+        if (prefs == null) prefs = getSharedPreferences("run", MODE_PRIVATE);
+        prefs.edit().putBoolean("running", true).putInt("target", rounds)
+                .putInt("done", 0).putInt("ok", 0).putLong("savedAt", System.currentTimeMillis()).apply();
         stopReason = "正常结束";
         Overlay.show(this);
+        beatSec = 0;
+        beatH.removeCallbacks(beatR);
+        beatH.post(beatR);
         setStatus("已启动，共 " + rounds + " 轮");
         if (wake != null && !wake.isHeld()) wake.acquire();
         worker = new Thread(new Runnable() {
             @Override
             public void run() {
                 try {
-                    for (int i = 1; i <= rounds && running; i++) {
+                    for (int i = 1; i <= rounds && running && !workerExit; i++) {
                         round = i;
                         setStatus("第 " + i + "/" + rounds + " 轮 · 开始");
                         note("—— 第 " + i + "/" + rounds + " 轮 ——");
@@ -181,10 +274,13 @@ public class AutoService extends AccessibilityService {
                             good = false;
                         }
                         done = i;
+                        if (prefs != null) {
+                            prefs.edit().putInt("done", done).putInt("ok", ok).putLong("savedAt", System.currentTimeMillis()).apply();
+                        }
                         if (good) {
                             ok++;
                             failStreak = 0;
-                        } else {
+                        } else if (!workerExit) {
                             failStreak++;
                             if (failStreak >= 3) {
                                 note("连续 " + failStreak + " 轮失败，先停手等你处理");
@@ -200,15 +296,21 @@ public class AutoService extends AccessibilityService {
                         if (i < rounds) sleep(good ? 25000 + rnd(30000) : 15000);
                     }
                 } finally {
+                    if (workerExit) {
+                        ACTIVE = false;
+                        note("等待无障碍重连后自动续跑（resume）");
+                        return;
+                    }
                     running = false;
+                    if (prefs != null) prefs.edit().putBoolean("running", false).apply();
+                    beatH.removeCallbacks(beatR);
                     if (wake != null && wake.isHeld()) wake.release();
                     setStatus("已结束：共 " + done + " 轮");
                     String summary = "原因：" + stopReason + "\n跑了 " + done + " 轮，成功 "
                             + ok + " 轮。\n\n" + AutoService.dumpLogTail(12);
                     note("任务结束：跑了 " + done + " 轮，成功 " + ok + " 轮");
                     Push.send(AutoService.this, "外星仔自动化结束（" + stopReason + "）", summary);
-                    sleep(1500);
-                    Overlay.hide();
+                    Overlay.set("外星仔：已结束\n跑了 " + done + " 轮 · 成功 " + ok + " 轮 / " + stopReason);
                 }
             }
         }, "wz-worker");
@@ -216,6 +318,7 @@ public class AutoService extends AccessibilityService {
     }
 
     private boolean doRound() {
+        if (workerExit) return false;
         Home h = ensureHome();
         if (h == null) {
             note("回不到首页，放弃本轮");
@@ -290,6 +393,16 @@ public class AutoService extends AccessibilityService {
             }
         }
         if (!started) {
+            // 凌晨经常整段没有填充，等一会儿再试，别直接收工
+            noFillRounds++;
+            if (noFillRounds <= 3) {
+                int waitMin = 3;
+                note("暂无广告填充，等 " + waitMin + " 分钟后重试（第 " + noFillRounds + "/3 次）");
+                setStatus("第 " + round + " 轮 · 无填充，等待 " + waitMin + " 分钟");
+                sleep(waitMin * 60 * 1000L);
+                ensureHome();
+                return false;
+            }
             note("多次重试仍无广告，先停手");
             stopReason = "广告拉不到";
             Push.send(this, "外星仔：广告拉不到",
@@ -297,6 +410,7 @@ public class AutoService extends AccessibilityService {
             running = false;
             return false;
         }
+        noFillRounds = 0;
         AdKind kind = classify(lastClass);
         note("广告开始 " + lastClass + " → " + kind);
         setStatus("第 " + round + " 轮 · 广告中 " + kind);
@@ -345,7 +459,7 @@ public class AutoService extends AccessibilityService {
     }
 
     private Home ensureHome() {
-        for (int i = 0; i < 5 && running; i++) {
+        for (int i = 0; i < 5 && running && !workerExit; i++) {
             if (i == 2) {
                 // 两轮都回不去，按用户的思路：退到后台杀进程再重开
                 if (killBoosterBackground()) {
@@ -354,14 +468,23 @@ public class AutoService extends AccessibilityService {
                 }
             }
             if (!atHome()) {
-                goHomeScreen();
                 launchApp();
+                sleep(2500);
             }
             long t0 = SystemClock.uptimeMillis();
             boolean refreshed = false;
             while (SystemClock.uptimeMillis() - t0 < 9000 && running) {
                 Home h = readHome();
-                if (h != null && h.duration >= 0) return h;
+                if (h != null && h.duration >= 0) {
+                    deadBeats = 0;
+                    return h;
+                }
+                deadBeats++;
+                if (deadBeats >= 6) {
+                    deadBeats = 0;
+                    resetAccessibilityConnection("连续 6 次读不到首页");
+                    return null;
+                }
                 if (!refreshed) {
                     refreshed = true;
                     Snap ss = snap();
@@ -369,9 +492,12 @@ public class AutoService extends AccessibilityService {
                     sleep(1500);
                     Home h2 = readHome();
                     if (h2 != null && h2.duration >= 0) return h2;
-                    // 还读不出就来一次应用内下拉刷新
-                    pullToRefresh();
-                    sleep(2500);
+                    // 只在确认处于外星仔首页时才下拉刷新；
+                    // 否则手势会落到桌面上，把「负一屏搜索」拉出来，反而彻底卡死
+                    if (atHome()) {
+                        pullToRefresh();
+                        sleep(2500);
+                    }
                     Home h3 = readHome();
                     if (h3 != null && h3.duration >= 0) return h3;
                     continue;
@@ -379,6 +505,7 @@ public class AutoService extends AccessibilityService {
                 sleep(600);
             }
         }
+        dumpDiag("stuck");
         return null;
     }
 
@@ -479,6 +606,135 @@ public class AutoService extends AccessibilityService {
         note("下拉刷新");
     }
 
+    /** 判定失败时把现场存成文本：窗口列表、活跃窗口文字、首页窗口是否能找到。 */
+    private void dumpDiag(String tag) {
+        try {
+            java.io.File dir = new java.io.File(getExternalFilesDir(null), "diag");
+            if (!dir.exists()) dir.mkdirs();
+            String ts = new java.text.SimpleDateFormat("yyyyMMdd-HHmmss",
+                    java.util.Locale.CHINA).format(new java.util.Date());
+            java.io.File f = new java.io.File(dir, ts + "_" + tag + ".txt");
+            StringBuilder sb = new StringBuilder();
+            sb.append("time=").append(ts).append('\n');
+            sb.append("lastPkg=").append(lastPkg).append(" lastClass=").append(lastClass).append('\n');
+            sb.append("atHome=").append(atHome()).append('\n');
+            try {
+                java.util.List<android.view.accessibility.AccessibilityWindowInfo> wins = getWindows();
+                for (android.view.accessibility.AccessibilityWindowInfo w : wins) {
+                    AccessibilityNodeInfo r = w.getRoot();
+                    sb.append("win type=").append(w.getType())
+                            .append(" pkg=").append(r == null ? "null" : r.getPackageName())
+                            .append(" children=").append(r == null ? -1 : r.getChildCount()).append('\n');
+                }
+            } catch (Throwable t) {
+                sb.append("windowsErr=").append(t).append('\n');
+            }
+            Snap a = snap();
+            sb.append("activeOk=").append(a.ok).append(" activePkg=").append(a.pkg).append('\n');
+            sb.append("activeTexts=").append(a.texts).append('\n');
+            Snap hw = snapFromWindowWithSubmit();
+            sb.append("homeWindowFound=").append(hw != null).append('\n');
+            if (hw != null) sb.append("homeTexts=").append(hw.texts).append('\n');
+            java.io.FileOutputStream fo = new java.io.FileOutputStream(f);
+            fo.write(sb.toString().getBytes("UTF-8"));
+            fo.close();
+            note("诊断已保存 " + f.getName());
+        } catch (Throwable t) {
+            note("诊断保存失败 " + t);
+        }
+    }
+
+    /**
+     * 无障碍连接彻底失效（窗口列表空、活跃窗口读不到）时重建连接。
+     * 不用杀进程——直接把自己的无障碍开关关掉再打开，系统会重新绑定服务，
+     * 进程和悬浮窗都还在。需要 WRITE_SECURE_SETTINGS（一次性 adb 授权）。
+     */
+    private void resetAccessibilityConnection(String why) {
+        note("无障碍连接失效（" + why + "）→ 切换无障碍开关重建连接");
+        if (prefs != null) prefs.edit().putBoolean("running", true).putInt("target", TARGET).putLong("savedAt", System.currentTimeMillis()).apply();
+        workerExit = true;   // 让当前 worker 退出
+        ACTIVE = false;      // 让重建后的新实例能接手续跑
+        try {
+            android.content.ContentResolver cr = getContentResolver();
+            android.provider.Settings.Secure.putString(cr,
+                    android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, "");
+            sleep(1000);
+            android.provider.Settings.Secure.putString(cr,
+                    android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+                    getPackageName() + "/" + AutoService.class.getName());
+            note("开关已切换，等待系统重新绑定");
+        } catch (Throwable t) {
+            note("切换无障碍失败（缺 WRITE_SECURE_SETTINGS？）：" + t);
+        }
+    }
+
+    /** 从持久化状态继续跑剩下的轮数。 */
+    private void resume(final int target, final int savedDone, final int savedOk) {
+        if (ACTIVE || (worker != null && worker.isAlive())) {
+            note("续跑跳过：已有线程在跑");
+            return;
+        }
+        ACTIVE = true;
+        running = true;
+        done = savedDone;
+        ok = savedOk;
+        failStreak = 0;
+        deadBeats = 0;
+        Overlay.show(this);
+        beatSec = 0;
+        beatH.removeCallbacks(beatR);
+        beatH.post(beatR);
+        setStatus("续跑，从第 " + (savedDone + 1) + " 轮开始");
+        worker = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    for (int i = savedDone + 1; i <= target && running && !workerExit; i++) {
+                        round = i;
+                        setStatus("第 " + i + "/" + target + " 轮 · 开始");
+                        note("—— 第 " + i + "/" + target + " 轮（续跑）——");
+                        boolean good;
+                        try {
+                            good = doRound();
+                        } catch (Throwable t) {
+                            note("本轮异常：" + t);
+                            good = false;
+                        }
+                        done = i;
+                        if (good) {
+                            ok++;
+                            failStreak = 0;
+                        } else {
+                            failStreak++;
+                        }
+                        if (prefs != null) prefs.edit().putInt("done", done).putInt("ok", ok).putLong("savedAt", System.currentTimeMillis()).apply();
+                        if (!running) break;
+                        if (i < target) sleep(good ? 25000 + rnd(30000) : 15000);
+                    }
+                } finally {
+                    if (workerExit) {
+                        ACTIVE = false;
+                        note("等待无障碍重连后自动续跑");
+                    }
+                    if (!workerExit) {
+                        running = false;
+                    }
+                    if (!workerExit && prefs != null) {
+                        prefs.edit().putBoolean("running", false).apply();
+                    }
+                    if (workerExit) return;
+                    beatH.removeCallbacks(beatR);
+                    setStatus("已结束：共 " + done + " 轮");
+                    note("任务结束：跑了 " + done + " 轮，成功 " + ok + " 轮");
+                    Push.send(AutoService.this, "外星仔自动化结束（" + stopReason + "）",
+                            "跑了 " + done + " 轮，成功 " + ok + " 轮。\n\n" + AutoService.dumpLogTail(10));
+                    Overlay.set("外星仔：已结束\n跑了 " + done + " 轮 · 成功 " + ok + " 轮\n" + stopReason);
+                }
+            }
+        }, "wz-resume");
+        worker.start();
+    }
+
     private void goHomeScreen() {
         performGlobalAction(GLOBAL_ACTION_HOME);
         sleep(600);
@@ -569,11 +825,13 @@ public class AutoService extends AccessibilityService {
     }
 
     private boolean verify(Home before) {
-        setStatus("第 " + round + " 轮 · 等到账");
+        setStatus("第 " + round + " 轮 · 等页面恢复");
         long t0 = SystemClock.uptimeMillis();
         int baseProgress = progressOf(before.stages);
         int relaunch = 0;
-        while (SystemClock.uptimeMillis() - t0 < 90000 && running) {
+        // 奖励是延迟到账的，没必要死等 90 秒：页面能读就直接进下一轮，
+        // 到没到账由下一轮起始读数对照体现
+        while (SystemClock.uptimeMillis() - t0 < 25000 && running) {
             Home now = readHome();
             if (now == null || now.duration < 0) {
                 if (SystemClock.uptimeMillis() - t0 > 20000 && relaunch < 2) {
@@ -596,9 +854,10 @@ public class AutoService extends AccessibilityService {
                 note("到账确认：时长 " + before.durationText() + " → " + now.durationText());
                 return true;
             }
-            sleep(2500);
+            note("页面已恢复，暂无增量（延迟到账，下一轮起始会体现）");
+            return false;
         }
-        note("没等到到账（可能延迟，下一轮会体现）");
+        note("25 秒内页面没恢复，直接进下一轮");
         return false;
     }
 
@@ -862,7 +1121,7 @@ public class AutoService extends AccessibilityService {
         walk(root, s, 0);
         // 活跃窗口不是首页（例如广告 Activity 盖在上面）时，翻窗口列表把首页找出来。
         // 只读不点，点仍然走手势落在最上层。
-        if (s.submit == null && PKG.equals(s.pkg)) {
+        if (s.submit == null && PKG.equals(s.pkg) && lastClass.endsWith("MainActivity")) {
             Snap home = snapFromWindowWithSubmit();
             if (home != null) return home;
         }
@@ -878,7 +1137,10 @@ public class AutoService extends AccessibilityService {
                 String pk = r0 == null ? "null" : String.valueOf(r0.getPackageName());
                 dbg.append(pk.replace("com.", "")).append("(t").append(w.getType()).append(") ");
             }
-            note("窗口扫描: " + dbg);
+            if (SystemClock.uptimeMillis() - lastScanLog > 5000) {
+                lastScanLog = SystemClock.uptimeMillis();
+                note("窗口扫描: " + dbg);
+            }
             for (android.view.accessibility.AccessibilityWindowInfo w : wins) {
                 AccessibilityNodeInfo r = w.getRoot();
                 if (r == null) continue;
