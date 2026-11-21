@@ -49,6 +49,12 @@ public class AutoService extends AccessibilityService {
             if (!running) return;
             beatSec++;
             refreshOverlay("外星仔 #" + beatSec + "\n" + STATUS + "\n成功 " + ok + " / " + done);
+            // 看门狗：服务实例丢了也要能重建，不能只在读页面时才自愈
+            if (INST == null && SystemClock.uptimeMillis() - lastRebind > 60000) {
+                lastRebind = SystemClock.uptimeMillis();
+                note("悬浮窗看门狗：无障碍服务实例丢失，重建连接");
+                toggleAccessibility();
+            }
             beatH.postDelayed(this, 1000);
         }
     };
@@ -57,6 +63,7 @@ public class AutoService extends AccessibilityService {
     private volatile String lastPkg = "";
     private volatile long lastKick = 0;
     private volatile long lastScanLog = 0;
+    private static volatile long lastRebind = 0;
 
     // 广告素材最爱跳的几家；检测到就秒退，别等下一轮轮询
     private static final String[] JUMPERS = {
@@ -97,6 +104,7 @@ public class AutoService extends AccessibilityService {
     public static volatile int round = 0;
     static volatile int TARGET = 21;
     private static volatile boolean ACTIVE = false;
+    static volatile android.content.Context APP_CTX = null;
     private static volatile long LAST_SAVE = 0;
     private volatile boolean workerExit = false;
     private android.content.SharedPreferences prefs;
@@ -109,7 +117,10 @@ public class AutoService extends AccessibilityService {
     /** 刷新悬浮窗：掉线了自动补挂，再写文字。 */
     static void refreshOverlay(String text) {
         try {
-            if (!Overlay.isShown() && INST != null) Overlay.show(INST);
+            if (!Overlay.isShown()) {
+                android.content.Context c = (INST != null) ? INST : APP_CTX;
+                if (c != null) Overlay.show(c);
+            }
         } catch (Throwable ignored) {
         }
         Overlay.set(text);
@@ -140,6 +151,7 @@ public class AutoService extends AccessibilityService {
         super.onServiceConnected();
         boolean wasRunning = running;
         INST = this;
+        if (APP_CTX == null) APP_CTX = getApplicationContext();
         if (bgThread == null) {
             bgThread = new HandlerThread("wz-bg");
             bgThread.start();
@@ -159,11 +171,18 @@ public class AutoService extends AccessibilityService {
             note("连接已恢复，" + 4 + " 秒后从第 " + (done + 1) + " 轮继续");
             final int t = TARGET, d = done, o2 = ok;
             beatH.postDelayed(new Runnable() {
+                int retry = 0;
                 @Override
                 public void run() {
                     if (worker != null && worker.isAlive()) {
-                        note("旧线程还没退，2 秒后再试");
-                        beatH.postDelayed(this, 2000);
+                        retry++;
+                        if (retry % 5 == 0) note("旧线程还没退（" + retry + " 次），继续等");
+                        if (retry < 20) {
+                            beatH.postDelayed(this, 1500);
+                        } else {
+                            note("旧线程一直没退，强制接手");
+                            resume(t, d, o2);
+                        }
                         return;
                     }
                     resume(t, d, o2);
@@ -319,6 +338,16 @@ public class AutoService extends AccessibilityService {
 
     private boolean doRound() {
         if (workerExit) return false;
+        Snap pre = snap();
+        if (pre.ok) {
+            recoverUnknownPage(pre);
+            if (pre.pkg.equals(getPackageName())) {
+                note("当前停在本 App 界面，拉回外星仔");
+                goHomeScreen();
+                launchApp();
+                sleep(3000);
+            }
+        }
         Home h = ensureHome();
         if (h == null) {
             note("回不到首页，放弃本轮");
@@ -415,7 +444,7 @@ public class AutoService extends AccessibilityService {
         note("广告开始 " + lastClass + " → " + kind);
         setStatus("第 " + round + " 轮 · 广告中 " + kind);
 
-        String reason = handleAd(kind);
+        String reason = handleAd(kind, 140000L);
         note("广告结束：" + reason);
         if ("external".equals(reason)) {
             back();
@@ -495,7 +524,14 @@ public class AutoService extends AccessibilityService {
                     // 只在确认处于外星仔首页时才下拉刷新；
                     // 否则手势会落到桌面上，把「负一屏搜索」拉出来，反而彻底卡死
                     if (atHome()) {
-                        pullToRefresh();
+                        Snap guard = snap();
+                        String gj = TextUtils.join(" ", guard.texts);
+                        if (guard.submit != null || gj.contains("可暂停时长") || gj.contains("看广告")) {
+                            pullToRefresh();
+                        } else {
+                            note("页面还没有首页标记，跳过下拉刷新");
+                            recoverUnknownPage(guard);
+                        }
                         sleep(2500);
                     }
                     Home h3 = readHome();
@@ -530,15 +566,38 @@ public class AutoService extends AccessibilityService {
     }
 
     /** 时长显示成「— 时 — 分 — 秒」时，点一下右上角「每日刷新」重新拉数据。 */
+    /** 只有在确认是首页布局时才动手，避免手势落到充值中心之类的入口上。 */
+    private boolean isHomeLike(Snap s) {
+        if (s.submit != null) return true;
+        String joined = TextUtils.join(" ", s.texts);
+        return joined.contains("看广告") || joined.contains("可暂停时长");
+    }
+
     private boolean refreshHome(Snap s) {
         if (clickText(s, "每日刷新")) {
             note("时长读不出，点「每日刷新」重拉");
             return true;
         }
-        // 按文本找不到就按坐标兜底（1080x2340 基准）
+        if (!isHomeLike(s)) {
+            note("当前不在首页布局，放弃坐标兜底");
+            return false;
+        }
+        // 按文本找不到才按坐标兜底（1080x2340 基准，右上角「每日刷新」）
         tapXY(cx(892), cy(692));
         note("时长读不出，按坐标点「每日刷新」");
         return true;
+    }
+
+    /** 误入其它页面（充值中心、详情页等）时退回来。 */
+    private void recoverUnknownPage(Snap s) {
+        String joined = TextUtils.join(" ", s.texts);
+        boolean stray = (joined.contains("充值中心") || joined.contains("充值"))
+                && s.submit == null;
+        if (stray) {
+            note("检测到非首页页面，按返回退出");
+            back();
+            sleep(1500);
+        }
     }
 
     private boolean atHome() {
@@ -649,6 +708,25 @@ public class AutoService extends AccessibilityService {
      * 不用杀进程——直接把自己的无障碍开关关掉再打开，系统会重新绑定服务，
      * 进程和悬浮窗都还在。需要 WRITE_SECURE_SETTINGS（一次性 adb 授权）。
      */
+    private static void toggleAccessibility() {
+        android.content.Context c = (INST != null) ? INST : APP_CTX;
+        if (c == null) return;
+        try {
+            android.content.ContentResolver cr = c.getContentResolver();
+            android.provider.Settings.Secure.putString(cr,
+                    android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, "");
+            try {
+                Thread.sleep(900);
+            } catch (InterruptedException ignored) {
+            }
+            android.provider.Settings.Secure.putString(cr,
+                    android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+                    c.getPackageName() + "/" + AutoService.class.getName());
+        } catch (Throwable t) {
+            note("切换无障碍失败：" + t);
+        }
+    }
+
     private void resetAccessibilityConnection(String why) {
         note("无障碍连接失效（" + why + "）→ 切换无障碍开关重建连接");
         if (prefs != null) prefs.edit().putBoolean("running", true).putInt("target", TARGET).putLong("savedAt", System.currentTimeMillis()).apply();
@@ -831,7 +909,7 @@ public class AutoService extends AccessibilityService {
         int relaunch = 0;
         // 奖励是延迟到账的，没必要死等 90 秒：页面能读就直接进下一轮，
         // 到没到账由下一轮起始读数对照体现
-        while (SystemClock.uptimeMillis() - t0 < 25000 && running) {
+        while (SystemClock.uptimeMillis() - t0 < 25000 && running && !workerExit) {
             Home now = readHome();
             if (now == null || now.duration < 0) {
                 if (SystemClock.uptimeMillis() - t0 > 20000 && relaunch < 2) {
@@ -895,32 +973,37 @@ public class AutoService extends AccessibilityService {
             // 广告 Activity 起来后 lastClass 就不再是 MainActivity
             if (!lastClass.endsWith("MainActivity")) return true;
             Snap s = snap();
-            if (s.ok && !s.pkg.isEmpty() && !PKG.equals(s.pkg)) return true;
+            if (s.ok && !s.pkg.isEmpty() && !PKG.equals(s.pkg)) {
+                if (s.pkg.equals(getPackageName())) continue;  // 我们自己的界面
+                return true;
+            }
             sleep(400);
         }
         return false;
     }
 
-    private String handleAd(AdKind kind) {
+    private String handleAd(AdKind kind, long budget) {
         long t0 = SystemClock.uptimeMillis();
         int taps = 0, dialogs = 0;
         long lastBeat = -20000;
         int lastCloseX = -1, lastCloseY = -1, sameClose = 0;
-        while (running) {
+        while (running && !workerExit) {
             long el = SystemClock.uptimeMillis() - t0;
+            if (el > budget) break;
             setStatus("第 " + round + " 轮 · 广告中 " + (el / 1000) + "s · " + kind);
             if (el - lastBeat > 20000) {
                 lastBeat = el;
                 note("心跳 " + (el / 1000) + "s · " + kind);
             }
-            if (el > 110000) break;
+            if (el > 140000) break;
             Snap s = snap();
             if (!s.ok) {
                 sleep(400);
                 continue;
             }
             String pkg = s.pkg;
-            if (!TextUtils.isEmpty(pkg) && !pkg.equals(PKG)) {
+            if (!TextUtils.isEmpty(pkg) && !pkg.equals(PKG)
+                    && !pkg.equals(getPackageName())) {
                 note("跳到了 " + pkg);
                 return "external";
             }
@@ -977,14 +1060,14 @@ public class AutoService extends AccessibilityService {
                 return "timeout";
             }
             if (kind == AdKind.VIDEO) {
-                if (el > 65000 && taps < 2) {
+                if (el > 100000 && taps < 2) {
                     taps++;
                     note("盲点右上角 X (" + taps + ")");
                     tapX();
                     sleep(2200);
                     continue;
                 }
-                if (taps >= 2 && el > 90000) {
+                if (taps >= 2 && el > 130000) {
                     note("结束页救不回来，退出");
                     back();
                     sleep(1500);
