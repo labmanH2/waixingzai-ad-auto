@@ -103,6 +103,7 @@ public class AutoService extends AccessibilityService {
 
     public static volatile int round = 0;
     static volatile int TARGET = 21;
+    static volatile int GAP_SEC = 15;
     private static volatile boolean ACTIVE = false;
     static volatile android.content.Context APP_CTX = null;
     private static volatile long LAST_SAVE = 0;
@@ -267,6 +268,7 @@ public class AutoService extends AccessibilityService {
         deadBeats = 0;
         workerExit = false;
         TARGET = rounds;
+        GAP_SEC = getSharedPreferences("wz", MODE_PRIVATE).getInt("gap", 15);
         if (prefs == null) prefs = getSharedPreferences("run", MODE_PRIVATE);
         prefs.edit().putBoolean("running", true).putInt("target", rounds)
                 .putInt("done", 0).putInt("ok", 0).putLong("savedAt", System.currentTimeMillis()).apply();
@@ -312,7 +314,7 @@ public class AutoService extends AccessibilityService {
                             }
                         }
                         if (!running) break;
-                        if (i < rounds) sleep(good ? 25000 + rnd(30000) : 15000);
+                        if (i < rounds) sleep(good ? GAP_SEC * 1000L : 15000);
                     }
                 } finally {
                     if (workerExit) {
@@ -787,7 +789,7 @@ public class AutoService extends AccessibilityService {
                         }
                         if (prefs != null) prefs.edit().putInt("done", done).putInt("ok", ok).putLong("savedAt", System.currentTimeMillis()).apply();
                         if (!running) break;
-                        if (i < target) sleep(good ? 25000 + rnd(30000) : 15000);
+                        if (i < target) sleep(good ? GAP_SEC * 1000L : 15000);
                     }
                 } finally {
                     if (workerExit) {
@@ -909,7 +911,7 @@ public class AutoService extends AccessibilityService {
         int relaunch = 0;
         // 奖励是延迟到账的，没必要死等 90 秒：页面能读就直接进下一轮，
         // 到没到账由下一轮起始读数对照体现
-        while (SystemClock.uptimeMillis() - t0 < 25000 && running && !workerExit) {
+        while (SystemClock.uptimeMillis() - t0 < 7000 && running && !workerExit) {
             Home now = readHome();
             if (now == null || now.duration < 0) {
                 if (SystemClock.uptimeMillis() - t0 > 20000 && relaunch < 2) {
@@ -935,7 +937,7 @@ public class AutoService extends AccessibilityService {
             note("页面已恢复，暂无增量（延迟到账，下一轮起始会体现）");
             return false;
         }
-        note("25 秒内页面没恢复，直接进下一轮");
+        note("7 秒内页面没恢复，直接进下一轮");
         return false;
     }
 

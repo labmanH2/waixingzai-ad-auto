@@ -12,7 +12,10 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
 import android.widget.ScrollView;
+import android.widget.Spinner;
 import android.widget.TextView;
 
 public class MainActivity extends Activity {
@@ -121,6 +124,47 @@ public class MainActivity extends Activity {
             }
         });
         root.addView(scKey);
+
+        // 轮间休息下拉
+        LinearLayout gapRow = new LinearLayout(this);
+        gapRow.setOrientation(LinearLayout.HORIZONTAL);
+        gapRow.setGravity(Gravity.CENTER_VERTICAL);
+        gapRow.setPadding(0, dp(4), 0, dp(4));
+
+        TextView gapLabel = new TextView(this);
+        gapLabel.setText("\u8f6e\u95f4\u4f11\u606f");
+        gapLabel.setTextColor(Color.parseColor("#9be7ff"));
+        gapLabel.setTextSize(13);
+        gapRow.addView(gapLabel);
+
+        final Spinner gapSpin = new Spinner(this);
+        final int[] gaps = {15, 20, 30, 40, 50};
+        String[] labels = new String[gaps.length];
+        for (int i = 0; i < gaps.length; i++) labels[i] = gaps[i] + " \u79d2";
+        ArrayAdapter<String> ad = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_dropdown_item, labels);
+        gapSpin.setAdapter(ad);
+        int savedGap = getSharedPreferences("wz", MODE_PRIVATE).getInt("gap", 15);
+        for (int i = 0; i < gaps.length; i++) {
+            if (gaps[i] == savedGap) {
+                gapSpin.setSelection(i);
+                break;
+            }
+        }
+        gapSpin.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
+                getSharedPreferences("wz", MODE_PRIVATE).edit().putInt("gap", gaps[pos]).apply();
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
+        LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        gapRow.addView(gapSpin, glp);
+        root.addView(gapRow);
 
         Button overlayBtn = new Button(this);
         overlayBtn.setText("\u2462 \u60ac\u6d6e\u7a97\u6743\u9650");
