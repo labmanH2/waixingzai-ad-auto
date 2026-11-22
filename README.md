@@ -13,11 +13,6 @@
 | 成功率 | 21/21（无人值守） |
 | 依赖 | 零第三方库，APK 仅 37 KB |
 
-![运行中的手机界面](docs/images/app-overlay-running.png)
-
-<sub>运行中的实际画面：左上角悬浮窗显示心跳计数与当前状态，其余界面就是外星仔本身。
-截图中的账号昵称与 UID 已打码。</sub>
-
 > 本简介内容由 DeepSeek 辅助生成。
 
 ---
@@ -167,8 +162,6 @@ adb shell pm grant com.wz.auto android.permission.WRITE_SECURE_SETTINGS
 2. 点「**② 开始**」；
 3. 手机插着电、别锁屏（App 持有 `SCREEN_BRIGHT_WAKE_LOCK` 会保持屏幕常亮）；
 4. 剩下的交给它，左上角悬浮窗会显示实时状态：
-
-![悬浮窗详情](docs/images/app-overlay-detail.png)
 
 ```
 外星仔 #128                    ← 心跳计数，每秒 +1；停住 = 卡了
