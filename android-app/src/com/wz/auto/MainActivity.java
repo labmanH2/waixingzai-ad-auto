@@ -112,6 +112,16 @@ public class MainActivity extends Activity {
         });
         root.addView(pushBtn);
 
+        Button logBtn = new Button(this);
+        logBtn.setText("\u8fd0\u884c\u8bb0\u5f55");
+        logBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showEventLog();
+            }
+        });
+        root.addView(logBtn);
+
         // 轮间休息下拉
         LinearLayout gapRow = new LinearLayout(this);
         gapRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -274,6 +284,47 @@ public class MainActivity extends Activity {
                     }
                 })
                 .setNegativeButton("\u53d6\u6d88", null)
+                .show();
+    }
+
+    /** 展示最近运行事件，可一键复制，便于反馈问题。 */
+    private void showEventLog() {
+        String text = EventLog.tail(this, 60);
+
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setTextSize(10);
+        tv.setTypeface(android.graphics.Typeface.MONOSPACE);
+        tv.setTextIsSelectable(true);
+        int pad = dp(12);
+        tv.setPadding(pad, pad, pad, pad);
+
+        android.widget.ScrollView sv = new android.widget.ScrollView(this);
+        sv.addView(tv);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(380));
+        sv.setLayoutParams(lp);
+
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("\u8fd0\u884c\u8bb0\u5f55")
+                .setView(sv)
+                .setPositiveButton("\u590d\u5236", new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface d, int w) {
+                        android.content.ClipboardManager cm =
+                                (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText(
+                                "wz-events", EventLog.tail(MainActivity.this, 200)));
+                        AutoService.note("运行记录已复制到剪贴板");
+                    }
+                })
+                .setNeutralButton("\u6587\u4ef6\u4f4d\u7f6e", new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface d, int w) {
+                        AutoService.note("记录文件：" + EventLog.path(MainActivity.this));
+                    }
+                })
+                .setNegativeButton("\u5173\u95ed", null)
                 .show();
     }
 }

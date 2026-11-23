@@ -134,6 +134,13 @@ public class AutoService extends AccessibilityService {
         refreshOverlay("外星仔自动化\n" + s);
     }
 
+
+    /** 关键事件：既打 logcat，也写进 events.log（logcat 会被系统回收）。 */
+    static void ev(String line) {
+        note(line);
+        EventLog.add(INST != null ? INST : APP_CTX, line);
+    }
+
     static void startRun(int rounds) {
         AutoService s = INST;
         if (s == null) {
@@ -280,6 +287,7 @@ public class AutoService extends AccessibilityService {
         beatH.removeCallbacks(beatR);
         beatH.post(beatR);
         setStatus("已启动，共 " + rounds + " 轮");
+        ev("开始：目标 " + rounds + " 轮，轮间休息 " + GAP_SEC + " 秒");
         if (wake != null && !wake.isHeld()) wake.acquire();
         worker = new Thread(new Runnable() {
             @Override
@@ -299,6 +307,8 @@ public class AutoService extends AccessibilityService {
                         done = i;
                         if (prefs != null) {
                             prefs.edit().putInt("done", done).putInt("ok", ok).putLong("savedAt", System.currentTimeMillis()).apply();
+                        EventLog.add(INST != null ? INST : APP_CTX,
+                                "第 " + i + " 轮结束：ok=" + good);
                         }
                         if (good) {
                             ok++;
@@ -334,7 +344,8 @@ public class AutoService extends AccessibilityService {
                             ? (cost / 60) + " 分 " + (cost % 60) + " 秒" : "未知";
                     String summary = "原因：" + stopReason + "\n跑了 " + done + " 轮，成功 "
                             + ok + " 轮\n用时 " + costText + "\n\n" + AutoService.dumpLogTail(12);
-                    note("任务结束：跑了 " + done + " 轮，成功 " + ok + " 轮，用时 " + costText);
+                    ev("结束：跑了 " + done + " 轮，成功 " + ok + " 轮，用时 " + costText
+                            + "，原因=" + stopReason);
                     Push.send(AutoService.this, "外星仔自动化结束（" + stopReason + "）", summary);
                     Overlay.set("外星仔：已结束\n跑了 " + done + " 轮 · 成功 " + ok + " 轮 / " + stopReason);
                 }
@@ -433,7 +444,7 @@ public class AutoService extends AccessibilityService {
             noFillRounds++;
             if (noFillRounds <= 3) {
                 int waitMin = 3;
-                note("暂无广告填充，等 " + waitMin + " 分钟后重试（第 " + noFillRounds + "/3 次）");
+                ev("无填充：第 " + round + " 轮等待 " + waitMin + " 分钟后重试（" + noFillRounds + "/3）");
                 setStatus("第 " + round + " 轮 · 无填充，等待 " + waitMin + " 分钟");
                 sleep(waitMin * 60 * 1000L);
                 ensureHome();
@@ -735,7 +746,7 @@ public class AutoService extends AccessibilityService {
     }
 
     private void resetAccessibilityConnection(String why) {
-        note("无障碍连接失效（" + why + "）→ 切换无障碍开关重建连接");
+        ev("自愈：无障碍连接失效（" + why + "），正在重建");
         if (prefs != null) prefs.edit().putBoolean("running", true).putInt("target", TARGET).putLong("savedAt", System.currentTimeMillis()).apply();
         workerExit = true;   // 让当前 worker 退出
         ACTIVE = false;      // 让重建后的新实例能接手续跑
@@ -810,9 +821,14 @@ public class AutoService extends AccessibilityService {
                     if (workerExit) return;
                     beatH.removeCallbacks(beatR);
                     setStatus("已结束：共 " + done + " 轮");
-                    note("任务结束：跑了 " + done + " 轮，成功 " + ok + " 轮");
+                    long cost = RUN_START > 0 ? (System.currentTimeMillis() - RUN_START) / 1000 : 0;
+                    String costText = cost > 0
+                            ? (cost / 60) + " 分 " + (cost % 60) + " 秒" : "未知";
+                    ev("结束：跑了 " + done + " 轮，成功 " + ok + " 轮，用时 " + costText
+                            + "，原因=" + stopReason);
                     Push.send(AutoService.this, "外星仔自动化结束（" + stopReason + "）",
-                            "跑了 " + done + " 轮，成功 " + ok + " 轮。\n\n" + AutoService.dumpLogTail(10));
+                            "原因：" + stopReason + "\n跑了 " + done + " 轮，成功 " + ok
+                                    + " 轮\n用时 " + costText + "\n\n" + AutoService.dumpLogTail(10));
                     Overlay.set("外星仔：已结束\n跑了 " + done + " 轮 · 成功 " + ok + " 轮\n" + stopReason);
                 }
             }
