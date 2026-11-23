@@ -102,47 +102,15 @@ public class MainActivity extends Activity {
         row.addView(stop);
         root.addView(row);
 
-        final EditText scKey = new EditText(this);
-        scKey.setHint("Server\u9171 SendKey\uff08\u4e0d\u586b\u5219\u4e0d\u63a8\u9001\uff09");
-        scKey.setSingleLine(true);
-        // 密码样式，避免截图或旁人看到 SendKey
-        scKey.setInputType(android.text.InputType.TYPE_CLASS_TEXT
-                | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        scKey.setTextColor(Color.WHITE);
-        scKey.setHintTextColor(Color.parseColor("#777788"));
-        scKey.setTextSize(12);
-        scKey.setText(Push.sendKey(this));
-        scKey.addTextChangedListener(new android.text.TextWatcher() {
-            @Override
-            public void beforeTextChanged(CharSequence s, int a, int b, int c) {
-            }
-
-            @Override
-            public void onTextChanged(CharSequence s, int a, int b, int c) {
-                Push.setSendKey(MainActivity.this, s.toString());
-            }
-
-            @Override
-            public void afterTextChanged(android.text.Editable e) {
-            }
-        });
-        LinearLayout keyRow = new LinearLayout(this);
-        keyRow.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout.LayoutParams klp = new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        keyRow.addView(scKey, klp);
-
-        Button testPush = new Button(this);
-        testPush.setText("\u6d4b\u8bd5\u63a8\u9001");
-        testPush.setTextSize(12);
-        testPush.setOnClickListener(new View.OnClickListener() {
+        Button pushBtn = new Button(this);
+        pushBtn.setText("\u63a8\u9001\u8bbe\u7f6e");
+        pushBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                Push.sendTest(MainActivity.this);
+                openPushSettings();
             }
         });
-        keyRow.addView(testPush);
-        root.addView(keyRow);
+        root.addView(pushBtn);
 
         // 轮间休息下拉
         LinearLayout gapRow = new LinearLayout(this);
@@ -243,5 +211,69 @@ public class MainActivity extends Activity {
 
     private int dp(int v) {
         return Math.round(getResources().getDisplayMetrics().density * v);
+    }
+
+    /** 推送设置：SendKey + 是否推送 + 测试。 */
+    private void openPushSettings() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(16);
+        box.setPadding(pad, pad, pad, pad);
+
+        TextView tip = new TextView(this);
+        tip.setText("SendKey \u5728 sct.ftqq.com \u83b7\u53d6\uff0c\u5f62\u5982 SCT \u5f00\u5934\u7684\u4e32");
+        tip.setTextSize(11);
+        box.addView(tip);
+
+        final EditText key = new EditText(this);
+        key.setSingleLine(true);
+        key.setHint("SCT...");
+        key.setText(Push.sendKey(this));
+        key.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        box.addView(key);
+
+        final android.widget.CheckBox show = new android.widget.CheckBox(this);
+        show.setText("\u663e\u793a\u5bc6\u94a5");
+        show.setTextSize(12);
+        show.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(android.widget.CompoundButton b, boolean checked) {
+                key.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                        | (checked ? android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                        : android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD));
+                key.setSelection(key.getText().length());
+            }
+        });
+        box.addView(show);
+
+        final android.widget.CheckBox enabled = new android.widget.CheckBox(this);
+        enabled.setText("\u4efb\u52a1\u7ed3\u675f\u65f6\u63a8\u9001");
+        enabled.setTextSize(12);
+        enabled.setChecked(getSharedPreferences("wz", MODE_PRIVATE).getBoolean("push_enabled", true));
+        box.addView(enabled);
+
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("\u63a8\u9001\u8bbe\u7f6e")
+                .setView(box)
+                .setPositiveButton("\u4fdd\u5b58", new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface d, int w) {
+                        Push.setSendKey(MainActivity.this, key.getText().toString());
+                        getSharedPreferences("wz", MODE_PRIVATE).edit()
+                                .putBoolean("push_enabled", enabled.isChecked()).apply();
+                        AutoService.note("推送设置已保存"
+                                + (enabled.isChecked() ? "（开启推送）" : "（关闭推送）"));
+                    }
+                })
+                .setNeutralButton("\u6d4b\u8bd5", new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface d, int w) {
+                        Push.setSendKey(MainActivity.this, key.getText().toString());
+                        Push.sendTest(MainActivity.this);
+                    }
+                })
+                .setNegativeButton("\u53d6\u6d88", null)
+                .show();
     }
 }

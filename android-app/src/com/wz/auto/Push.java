@@ -41,7 +41,15 @@ public class Push {
                 "这是一条测试消息。\n\n收到它说明 SendKey 和网络都正常。");
     }
 
+    static boolean enabled(Context c) {
+        return prefs(c).getBoolean("push_enabled", true);
+    }
+
     static void send(final Context c, final String title, final String body) {
+        if (!enabled(c)) {
+            AutoService.note("推送已在设置里关闭，跳过");
+            return;
+        }
         final String key = sendKey(c);
         if (key == null || key.isEmpty()) {
             AutoService.note("没配置 SendKey，跳过推送");
