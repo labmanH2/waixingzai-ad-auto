@@ -104,6 +104,7 @@ public class AutoService extends AccessibilityService {
     public static volatile int round = 0;
     static volatile int TARGET = 21;
     static volatile int GAP_SEC = 15;
+    private static volatile long RUN_START = 0;
     private static volatile boolean ACTIVE = false;
     static volatile android.content.Context APP_CTX = null;
     private static volatile long LAST_SAVE = 0;
@@ -269,6 +270,7 @@ public class AutoService extends AccessibilityService {
         workerExit = false;
         TARGET = rounds;
         GAP_SEC = getSharedPreferences("wz", MODE_PRIVATE).getInt("gap", 15);
+        RUN_START = System.currentTimeMillis();
         if (prefs == null) prefs = getSharedPreferences("run", MODE_PRIVATE);
         prefs.edit().putBoolean("running", true).putInt("target", rounds)
                 .putInt("done", 0).putInt("ok", 0).putLong("savedAt", System.currentTimeMillis()).apply();
@@ -327,9 +329,12 @@ public class AutoService extends AccessibilityService {
                     beatH.removeCallbacks(beatR);
                     if (wake != null && wake.isHeld()) wake.release();
                     setStatus("已结束：共 " + done + " 轮");
+                    long cost = RUN_START > 0 ? (System.currentTimeMillis() - RUN_START) / 1000 : 0;
+                    String costText = cost > 0
+                            ? (cost / 60) + " 分 " + (cost % 60) + " 秒" : "未知";
                     String summary = "原因：" + stopReason + "\n跑了 " + done + " 轮，成功 "
-                            + ok + " 轮。\n\n" + AutoService.dumpLogTail(12);
-                    note("任务结束：跑了 " + done + " 轮，成功 " + ok + " 轮");
+                            + ok + " 轮\n用时 " + costText + "\n\n" + AutoService.dumpLogTail(12);
+                    note("任务结束：跑了 " + done + " 轮，成功 " + ok + " 轮，用时 " + costText);
                     Push.send(AutoService.this, "外星仔自动化结束（" + stopReason + "）", summary);
                     Overlay.set("外星仔：已结束\n跑了 " + done + " 轮 · 成功 " + ok + " 轮 / " + stopReason);
                 }

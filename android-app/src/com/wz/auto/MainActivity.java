@@ -105,6 +105,9 @@ public class MainActivity extends Activity {
         final EditText scKey = new EditText(this);
         scKey.setHint("Server\u9171 SendKey\uff08\u4e0d\u586b\u5219\u4e0d\u63a8\u9001\uff09");
         scKey.setSingleLine(true);
+        // 密码样式，避免截图或旁人看到 SendKey
+        scKey.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
         scKey.setTextColor(Color.WHITE);
         scKey.setHintTextColor(Color.parseColor("#777788"));
         scKey.setTextSize(12);
@@ -123,7 +126,23 @@ public class MainActivity extends Activity {
             public void afterTextChanged(android.text.Editable e) {
             }
         });
-        root.addView(scKey);
+        LinearLayout keyRow = new LinearLayout(this);
+        keyRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams klp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        keyRow.addView(scKey, klp);
+
+        Button testPush = new Button(this);
+        testPush.setText("\u6d4b\u8bd5\u63a8\u9001");
+        testPush.setTextSize(12);
+        testPush.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Push.sendTest(MainActivity.this);
+            }
+        });
+        keyRow.addView(testPush);
+        root.addView(keyRow);
 
         // 轮间休息下拉
         LinearLayout gapRow = new LinearLayout(this);
